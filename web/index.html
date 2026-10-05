@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoaxSim WASM · 同轴信号传输模拟</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0e0f12; color: #d7dae0; font-family: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         padding: 20px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #7a808c; font-size: 13px; margin-bottom: 14px; }
+  .panel { background: #16181d; border: 1px solid #262a33; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button, select { background: #20242c; color: #d7dae0; border: 1px solid #333947; border-radius: 8px;
+                   padding: 7px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #2a2f3a; } button.on { background: #3a4254; border-color: #55617a; color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chip { font-size: 12px; padding: 5px 12px; border-radius: 999px; }
+  .sliders { display: grid; grid-template-columns: repeat(auto-fill,minmax(210px,1fr)); gap: 8px 20px; }
+  .sl label { display: flex; justify-content: space-between; font-size: 12px; color: #9aa1ad; margin-bottom: 2px; }
+  .sl label b { color: #e8ebf0; font-weight: 500; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #8b93a7; height: 16px; }
+  input[type=number] { width: 64px; background: #20242c; color: #d7dae0; border: 1px solid #333947;
+                       border-radius: 6px; padding: 5px 8px; font-size: 13px; }
+  .screen-wrap { background: #000; border-radius: 10px; overflow: hidden; border: 1px solid #262a33; }
+  canvas#main { width: 100%; display: block; image-rendering: pixelated; }
+  canvas#scope { width: 100%; display: block; background: #0a0c10; }
+  .stats { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12px; color: #8a909c; margin-top: 8px;
+           font-family: ui-monospace, Consolas, monospace; }
+  .stats b { color: #c8cdd6; font-weight: 500; }
+  #loading { color: #8a909c; font-size: 14px; padding: 40px; text-align: center; }
+  .funnote { font-size: 12px; color: #6d7480; }
+  progress { width: 160px; height: 8px; accent-color: #8b93a7; }
+</style>
+</head>
+<body>
+
+<h1>CoaxSim WASM</h1>
+<div class="sub">真实 CVBS 编解码 · SD / HD 栅格 · 波形视频文件（WAV）导入导出</div>
+<div id="loading">正在加载 WASM…</div>
+
+<div id="app" style="display:none">
+  <div class="panel">
+    <div class="row">
+      <button id="fileBtn">📼 上传视频</button>
+      <input type="file" id="file" accept="video/*" hidden>
+      <button id="wavBtn">〰️ 上传 WAV</button>
+      <input type="file" id="wavfile" accept="audio/wav,audio/x-wav,.wav" hidden>
+      <button id="usePattern">🎛️ 测试卡</button>
+      <button id="playBtn">▶ 播放</button>
+      <span style="flex:1"></span>
+      <select id="stdSel">
+        <option value="0" selected>PAL 576i</option>
+        <option value="1">NTSC 480i</option>
+        <option value="2">HD 720p（PAL 彩色）</option>
+        <option value="3">HD 1080p（PAL 彩色）</option>
+      </select>
+      <select id="fsSel">
+        <option value="4" selected>4×fsc</option>
+        <option value="8">8×fsc</option>
+        <option value="16">16×fsc</option>
+      </select>
+      <label style="font-size:12px;color:#9aa1ad;display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="hbw" checked> 高带宽 AV
+      </label>
+    </div>
+    <div class="chips" id="presets"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <b style="font-size:13px">功能</b>
+      <button id="exportBtn">📥 导出整段 WAV</button>
+      <select id="exSrc" title="导出内容">
+        <option value="rx" selected>信道输出</option>
+        <option value="tx">编码器原始</option>
+      </select>
+      <select id="exFmt" title="格式">
+        <option value="i16" selected>16-bit PCM</option>
+        <option value="f32">float32</option>
+      </select>
+      <select id="exFps" title="帧率">
+        <option value="24">24</option><option value="25">25</option>
+        <option value="30" selected>30</option>
+        <option value="50">50</option><option value="60">60</option>
+      </select>
+      <label class="funnote">秒数(仅测试卡)</label>
+      <input type="number" id="exSec" value="3" min="1" max="30">
+      <progress id="exProg" max="1" value="0" hidden></progress>
+      <span id="exText" class="funnote"></span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="funnote">整段视频逐帧编码成 CVBS 波形写进 WAV（单声道，采样率 = 当前制式 fs）。Audacity 加噪声/均衡/延迟后再传回来解码；采样率不匹配会自动重采样，故意用 48kHz 导出再解可以看到采样定理咬掉同步头。</span>
+    </div>
+  </div>
+
+  <div class="panel"><div class="sliders" id="sliders"></div></div>
+  <div class="screen-wrap"><canvas id="main"></canvas></div>
+  <div class="screen-wrap" style="margin-top:10px"><canvas id="scope" height="110"></canvas></div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<script src="coax.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const STD_INFO = [
+  { name: "PAL 576i",   fsc: 4433618.75,  lines: 625,  vbi: 49, active: 576 },
+  { name: "NTSC 480i",  fsc: 3579545.00,  lines: 525,  vbi: 45, active: 480 },
+  { name: "HD 720p",    fsc: 14318181.82, lines: 750,  vbi: 30, active: 720  },
+  { name: "HD 1080p",   fsc: 21477272.73, lines: 1125, vbi: 45, active: 1080 },
+];
+
+const P = { len: 50, noise: 0.05, phase: 0, ghost: 0.1, hum: 0.1 };
+const PRESETS = {
+  "直连":   { len: 3,   noise: 0.01, phase: 0,  ghost: 0,   hum: 0.02 },
+  "五十米": { len: 50,  noise: 0.05, phase: 2,  ghost: 0.1, hum: 0.1 },
+  "二百米": { len: 200, noise: 0.15, phase: 6,  ghost: 0.3, hum: 0.3 },
+  "故障风": { len: 100, noise: 0.32, phase: 22, ghost: 0.5, hum: 0.5 },
+  "无信号": { len: 400, noise: 0.55, phase: 0,  ghost: 0,   hum: 0.7 },
+};
+const SLIDERS = [["len","线缆长度 (m)",0,400,1],["noise","噪声",0,1,0.01],
+                 ["phase","色度相位误差 (°)",0,45,0.5],["ghost","重影",0,1,0.01],["hum","工频哼声",0,1,0.01]];
+const inputs = {};
+for (const [k,label,mn,mx,st] of SLIDERS) {
+  const box = document.createElement("div");
+  box.className = "sl";
+  box.innerHTML = `<label><span>${label}</span><b></b></label>
+                   <input type="range" min="${mn}" max="${mx}" step="${st}" value="${P[k]}">`;
+  $("sliders").appendChild(box);
+  const input = box.querySelector("input"), val = box.querySelector("b");
+  inputs[k] = { input, val };
+  const show = () => val.textContent = input.value;
+  input.addEventListener("input", () => { P[k] = +input.value; show(); });
+  show();
+}
+function setPreset(n) {
+  Object.assign(P, PRESETS[n]);
+  for (const k in inputs) { inputs[k].input.value = P[k]; inputs[k].val.textContent = P[k]; }
+  document.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c.textContent === n));
+}
+for (const n in PRESETS) {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = n; b.onclick = () => setPreset(n);
+  $("presets").appendChild(b);
+}
+
+/* ================= 信号源 ================= */
+const video = document.createElement("video");
+video.playsInline = true; video.preload = "auto";
+let mode = "pattern";          // pattern | video | wav
+let wavPlay = true;
+let wav = null;                // {data: Float32Array, rate, name}
+let wavSrcPos = 0;             // 源采样域位置（重采样时用）
+
+$("fileBtn").onclick = () => $("file").click();
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (video.src) URL.revokeObjectURL(video.src);
+  video.src = URL.createObjectURL(f); video.load();
+  mode = "video"; updatePlayBtn();
+});
+$("usePattern").onclick = () => { mode = "pattern"; updatePlayBtn(); };
+
+function updatePlayBtn() {
+  const playing = (mode === "video" && !video.paused && !video.ended) || (mode === "wav" && wavPlay);
+  $("playBtn").textContent = playing ? "⏸ 暂停" : "▶ 播放";
+}
+$("playBtn").onclick = () => {
+  if (mode === "video") {
+    if (video.ended) video.currentTime = 0;
+    video.paused ? video.play() : video.pause();
+  } else if (mode === "wav") wavPlay = !wavPlay;
+  else return;
+  updatePlayBtn();
+};
+video.addEventListener("play", updatePlayBtn);
+video.addEventListener("pause", updatePlayBtn);
+
+/* ---- WAV 解析（PCM16/24/32、float32/64，取第一声道） ---- */
+function parseWav(buf) {
+  const v = new DataView(buf);
+  if (v.getUint32(0, true) !== 0x46464952) throw "不是 RIFF/WAV 文件";
+  let fmt = null, dataOff = -1, dataLen = 0;
+  let off = 12;
+  while (off + 8 <= v.byteLength) {
+    const id = v.getUint32(off, true), sz = v.getUint32(off + 4, true);
+    if (id === 0x20746D66) fmt = { off: off + 8, size: sz };
+    if (id === 0x61746164) { dataOff = off + 8; dataLen = sz; }
+    off += 8 + sz + (sz & 1);
+  }
+  if (!fmt || dataOff < 0) throw "WAV 缺少 fmt/data 块";
+  const format = v.getUint16(fmt.off, true), ch = v.getUint16(fmt.off + 2, true);
+  const rate = v.getUint32(fmt.off + 4, true), bits = v.getUint16(fmt.off + 14, true);
+  const nCh = Math.max(1, ch), bytes = bits / 8;
+  const frames = Math.floor(dataLen / (nCh * bytes));
+  let data;
+  if (format === 3 && bits === 32)      data = new Float32Array(buf, dataOff, frames);
+  else if (format === 3 && bits === 64) {
+    data = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) data[i] = v.getFloat64(dataOff + i * nCh * 8, true);
+  }
+  else if (bits === 16)
+    data = Float32Array.from(new Int16Array(buf, dataOff, frames * nCh).filter((_, i) => i % nCh === 0), x => x / 32768);
+  else if (bits === 24) {
+    data = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      const p = dataOff + i * nCh * 3;
+      data[i] = (v.getUint8(p) | (v.getUint8(p+1) << 8) | (v.getInt8(p+2) << 16)) / 8388608;
+    }
+  }
+  else if (bits === 32) {
+    data = Float32Array.from(new Int32Array(buf, dataOff, frames * nCh).filter((_, i) => i % nCh === 0), x => x / 2147483648);
+  }
+  else throw "不支持的位深 " + bits;
+  return { data, rate };
+}
+
+$("wavBtn").onclick = () => $("wavfile").click();
+$("wavfile").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const w = parseWav(reader.result);
+      if (w.data.byteLength > 600e6) throw "文件超过 600MB，浏览器存不下，导短一点或用 16-bit";
+      wav = { data: w.data, rate: w.rate, name: f.name };
+      wavSrcPos = 0;
+      mode = "wav"; wavPlay = true; updatePlayBtn();
+    } catch (err) { alert("WAV 解析失败：" + err); }
+  };
+  reader.readAsArrayBuffer(f);
+});
+
+/* ================= 整段 WAV 导出 ================= */
+const once = (el, ev) => new Promise(r => el.addEventListener(ev, r, { once: true }));
+let exporting = false;
+
+$("exportBtn").onclick = async () => {
+  if (exporting) return;
+  if (!window.showSaveFilePicker) { alert("导出整段需要 Chrome/Edge（用到文件流式写入）"); return; }
+  const info = STD_INFO[stdIdx];
+  const fs = Math.round(info.fsc * fsMul);
+  const which = $("exSrc").value, fmt = $("exFmt").value, fps = +$("exFps").value;
+  const bps = fmt === "f32" ? 4 : 2;
+  let total;
+  if (mode === "video" && video.duration) total = Math.max(1, Math.floor(video.duration * fps));
+  else total = Math.max(1, Math.floor(+$("exSec").value * fps));
+  const mb = (fs * bps * total / fps / 1048576).toFixed(0);
+  if (!confirm(`将导出 ${total} 帧 ≈ ${mb} MB（${fmt === "f32" ? "float32" : "16-bit PCM"} 单声道 ${(fs/1e6).toFixed(1)} MHz）。继续？`)) return;
+
+  exporting = true;
+  $("exportBtn").disabled = true;
+  $("exProg").hidden = false;
+  const wasPlaying = mode === "video" && !video.paused;
+  video.pause(); video.muted = true;
+  const SPL = mod._coax_spl(sim);
+  const frameSamples = SPL * info.lines;
+  const off = (which === "tx" ? mod._coax_tx(sim) : mod._coax_rx(sim)) >> 2;
+
+  const fh = await showSaveFilePicker({
+    suggestedName: `coax-${info.name.replace(/\s/g,"")}-${which}-${total}f.wav`
+  });
+  const wr = await fh.createWritable();
+  const hdr = new ArrayBuffer(44);
+  const hv = new DataView(hdr);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) hv.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); hv.setUint32(4, 0xFFFFFFFF, true); ws(8, "WAVE");
+  ws(12, "fmt "); hv.setUint32(16, 16, true);
+  hv.setUint16(20, fmt === "f32" ? 3 : 1, true);
+  hv.setUint16(22, 1, true);                 // 单声道
+  hv.setUint32(24, fs, true);
+  hv.setUint32(28, fs * bps, true);
+  hv.setUint16(32, bps, true);
+  hv.setUint16(34, bps * 8, true);
+  ws(36, "data"); hv.setUint32(40, 0xFFFFFFFF, true);
+  await wr.write(hdr);
+
+  const f32 = mod.HEAPF32.subarray(off, off + frameSamples);
+  const i16 = new Int16Array(frameSamples);
+  try {
+    if (mode === "video") {
+      video.currentTime = 0;
+      await once(video, "seeked");
+    }
+    for (let i = 0; i < total; i++) {
+      if (mode === "video") {
+        const tt = Math.min(i / fps, Math.max(0, video.duration - 0.001));
+        if (Math.abs(video.currentTime - tt) > 5e-4) { video.currentTime = tt; await once(video, "seeked"); }
+      }
+      drawSource(srcCtx, W, H, mode === "video" ? 0 : i / fps);
+      mod.HEAPU8.set(srcCtx.getImageData(0, 0, W, H).data, inPtr);
+      mod._coax_encode_channel(sim, inPtr, P.len, P.noise, P.ghost, P.hum,
+        $("hbw").checked ? 1 : 0, i);
+      if (fmt === "f32") await wr.write(f32);
+      else {
+        for (let j = 0; j < frameSamples; j++) {
+          const x = f32[j]; i16[j] = x <= -1 ? -32768 : x >= 1 ? 32767 : (x * 32767) | 0;
+        }
+        await wr.write(i16);
+      }
+      if ((i & 15) === 0) {
+        $("exProg").value = i / total;
+        $("exText").textContent = `${i}/${total} 帧`;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    // 回填头部大小
+    const dataSize = total * frameSamples * bps;
+    const h2 = new DataView(new ArrayBuffer(8));
+    h2.setUint32(0, 36 + dataSize, true);
+    h2.setUint32(4, dataSize, true);
+    await wr.seek(4);  await wr.write(new Uint8Array(h2.buffer, 0, 4));
+    await wr.seek(40); await wr.write(new Uint8Array(h2.buffer, 4, 4));
+    $("exText").textContent = `完成，${mb} MB`;
+  } finally {
+    await wr.close();
+    video.muted = false;
+    if (wasPlaying) video.play();
+    exporting = false;
+    $("exportBtn").disabled = false;
+    setTimeout(() => { $("exProg").hidden = true; }, 3000);
+  }
+};
+
+function drawSource(g, w, h, t) {
+  if (mode === "video" && video.readyState >= 2 && video.videoWidth) {
+    g.fillStyle = "#000"; g.fillRect(0, 0, w, h);
+    const s = Math.min(w / video.videoWidth, h / video.videoHeight);
+    const dw = video.videoWidth * s, dh = video.videoHeight * s;
+    g.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    return;
+  }
+  const bars = ["#c0c0c0","#c0c000","#00c0c0","#00c000","#c000c0","#c00000","#0000c0"];
+  const bw = w / 7;
+  for (let i = 0; i < 7; i++) { g.fillStyle = bars[i]; g.fillRect(i * bw, 0, bw + 1, h * 0.72); }
+  for (let k = 0; k < 6; k++) {
+    const vv = 255 - k * 51;
+    g.fillStyle = `rgb(${vv},${vv},${vv})`;
+    g.fillRect(k * w / 6, h * 0.72, w / 6 + 1, h * 0.14);
+  }
+  g.fillStyle = "#000"; g.fillRect(0, h * 0.86, w, h * 0.14);
+  g.strokeStyle = "#fff"; g.lineWidth = 2;
+  const cx = w / 2 + Math.sin(t * 0.8) * w * 0.32;
+  g.beginPath(); g.arc(cx, h * 0.93, h * 0.05, 0, 7); g.stroke();
+}
+
+let mod, sim, W, H, inPtr, outPtr, img, srcCv, srcCtx, outCv, outCtx, frame = 0;
+let stdIdx = 0, fsMul = 4;
+
+function createSim() {
+  if (sim) { mod._coax_destroy(sim); mod._free(inPtr); mod._free(outPtr); }
+  sim = mod._coax_create(stdIdx, fsMul);
+  W = mod._coax_width(sim); H = mod._coax_height(sim);
+  inPtr = mod._malloc(W * H * 4);
+  outPtr = mod._malloc(W * H * 4);
+  img = new ImageData(W, H);
+  srcCv = document.createElement("canvas"); srcCv.width = W; srcCv.height = H;
+  srcCtx = srcCv.getContext("2d", { willReadFrequently: true });
+  outCv = document.createElement("canvas"); outCv.width = W; outCv.height = H;
+  outCtx = outCv.getContext("2d");
+  const main = $("main"); main.width = W; main.height = H;
+  wavSrcPos = 0;
+}
+$("stdSel").onchange = e => {
+  stdIdx = +e.target.value;
+  const hd = stdIdx >= 2;
+  if (hd && fsMul > 4) { fsMul = 4; $("fsSel").value = "4"; }
+  $("fsSel").querySelectorAll("option").forEach(o => { o.disabled = hd && +o.value > 4; });
+  createSim();
+};
+$("fsSel").onchange = e => { fsMul = +e.target.value; createSim(); };
+
+const main = $("main"), mctx = main.getContext("2d");
+mctx.imageSmoothingEnabled = false;
+const scope = $("scope"), sctx = scope.getContext("2d");
+const t0 = performance.now();
+let lastT = 0;
+const rsScratch = new Float32Array(4 << 20);   // 重采样暂存（≤4M 采样）
+
+function resampleInto(src, srcPos, srcLen, fromRate, dst, dstLen, toRate) {
+  const ratio = fromRate / toRate;             // dst 每采样对应的源步长
+  for (let i = 0; i < dstLen; i++) {
+    const p = srcPos + i * ratio;
+    const i0 = p | 0, f = p - i0;
+    const a = i0 < src.length ? src[i0] : 0.3;
+    const b = i0 + 1 < src.length ? src[i0 + 1] : a;
+    dst[i] = a + (b - a) * f;
+  }
+}
+
+function loop() {
+  requestAnimationFrame(loop);
+  if (exporting) return;                       // 导出期间主循环让路
+  const t = (performance.now() - t0) / 1000;
+  const info = STD_INFO[stdIdx];
+  const SPL = mod._coax_spl(sim);
+  const frameSamples = SPL * info.lines;
+  const rxF = mod.HEAPF32, txF = mod.HEAPF32;
+  const txO = mod._coax_tx(sim) >> 2, rxO = mod._coax_rx(sim) >> 2;
+  const hbw = $("hbw").checked ? 1 : 0;
+
+  if (mode === "wav" && wav) {
+    if (wavPlay) {
+      const need = Math.round(info.fsc * fsMul);
+      if (wav.rate === need) {
+        const chunk = Math.min(frameSamples, wav.data.length - wavSrcPos);
+        txF.set(wav.data.subarray(wavSrcPos, wavSrcPos + chunk), txO);
+        if (chunk < frameSamples) txF.fill(0.3, txO + chunk, txO + frameSamples);
+        wavSrcPos = (wavSrcPos + frameSamples) % Math.max(1, wav.data.length);
+      } else {
+        // 重采样播放（源位置按源采样域推进）
+        const srcLen = Math.ceil(frameSamples * wav.rate / need);
+        if (rsScratch.length < frameSamples) rsScratch = new Float32Array(frameSamples);
+        resampleInto(wav.data, wavSrcPos, srcLen, wav.rate, rsScratch, frameSamples, need);
+        txF.set(rsScratch.subarray(0, frameSamples), txO);
+        wavSrcPos = (wavSrcPos + srcLen) % Math.max(1, wav.data.length - 1);
+      }
+    }
+    mod._coax_process_preload(sim, outPtr, P.len, P.noise, P.phase, P.ghost, P.hum, hbw, frame++);
+  } else {
+    drawSource(srcCtx, W, H, t);
+    mod.HEAPU8.set(srcCtx.getImageData(0, 0, W, H).data, inPtr);
+    mod._coax_process(sim, inPtr, outPtr, P.len, P.noise, P.phase, P.ghost, P.hum, hbw, frame++);
+  }
+  img.data.set(mod.HEAPU8.subarray(outPtr, outPtr + W * H * 4));
+  outCtx.putImageData(img, 0, 0);
+  mctx.drawImage(outCv, 0, 0);
+  const b = ((info.vbi + (info.active >> 1)) % info.lines) * SPL;
+  scope.width = Math.floor(SPL / 2);
+  sctx.clearRect(0, 0, scope.width, 110);
+  const plot = (off, arr, color) => {
+    sctx.strokeStyle = color; sctx.beginPath();
+    for (let i = 0; i < SPL; i += 2) {
+      const y = 110 - arr[off + b + i] / 1.1 * 110;
+      i === 0 ? sctx.moveTo(i / 2, y) : sctx.lineTo(i / 2, y);
+    }
+    sctx.stroke();
+  };
+  plot(rxO, rxF, "rgba(120,220,140,.9)");
+  plot(txO, txF, "rgba(255,255,255,.25)");
+  if (t - lastT > 0.25) {
+    lastT = t;
+    const fs = info.fsc * fsMul;
+    const modeStr = mode === "wav" ? `WAV: ${wav.name} (${(wav.rate/1e6).toFixed(2)}MHz)` :
+                    (mode === "video" ? "视频" : "测试卡");
+    $("stats").innerHTML =
+      `<span>制式 <b>${info.name}</b></span><span>信号源 <b>${modeStr}</b></span>` +
+      `<span>行同步抖动 <b>${mod._coax_jit(sim)} ns</b></span>` +
+      `<span>波形采样率 <b>${(fs / 1e6).toFixed(1)} MHz (${fsMul}×fsc)</b></span>` +
+      `<span>基带 <b>${W}×${H}</b></span>`;
+  }
+}
+
+(async () => {
+  mod = await CoaxModule();
+  $("loading").style.display = "none";
+  $("app").style.display = "";
+  setPreset("直连");
+  createSim();
+  loop();
+})();
+</script>
+</body>
+</html>
